@@ -1,18 +1,23 @@
-import { createParser, ParsedEvent, ReconnectInterval } from 'eventsource-parser'
+import { createParser } from 'eventsource-parser'
+import type { ParsedEvent, ReconnectInterval } from 'eventsource-parser'
 import type { ChatMessage } from '@/types'
 
-const model = import.meta.env.OPENAI_API_MODEL || 'gpt-3.5-turbo'
+export const model = import.meta.env.OPENAI_API_MODEL || 'gpt-3.5-turbo'
 
-export const generatePayload = (apiKey: string, messages: ChatMessage[]): RequestInit => ({
+export const generatePayload = (
+  apiKey: string,
+  messages: ChatMessage[],
+  temperature: number,
+): RequestInit & { dispatcher?: any } => ({
   headers: {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${apiKey}`,
+    'Authorization': `Bearer ${apiKey}`,
   },
   method: 'POST',
   body: JSON.stringify({
     model,
     messages,
-    temperature: 0.6,
+    temperature,
     stream: true,
   }),
 })
@@ -57,9 +62,8 @@ export const parseOpenAIStream = (rawResponse: Response) => {
       }
 
       const parser = createParser(streamParser)
-      for await (const chunk of rawResponse.body as any) {
+      for await (const chunk of rawResponse.body as any)
         parser.feed(decoder.decode(chunk))
-      }
     },
   })
 

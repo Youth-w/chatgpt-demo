@@ -1,11 +1,11 @@
-import type { ChatMessage, ErrorMessage } from '@/types'
-import { createSignal, Index, Show, onMount, onCleanup } from 'solid-js'
+import { Index, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { useThrottleFn } from 'solidjs-use'
+import { generateSignature } from '@/utils/auth'
 import IconClear from './icons/Clear'
 import MessageItem from './MessageItem'
 import SystemRoleSettings from './SystemRoleSettings'
 import ErrorMessageItem from './ErrorMessageItem'
-import { generateSignature } from '@/utils/auth'
-import { useThrottleFn } from 'solidjs-use'
+import type { ChatMessage, ErrorMessage } from '@/types'
 
 export default () => {
   let inputRef: HTMLTextAreaElement
@@ -16,20 +16,35 @@ export default () => {
   const [currentAssistantMessage, setCurrentAssistantMessage] = createSignal('')
   const [loading, setLoading] = createSignal(false)
   const [controller, setController] = createSignal<AbortController>(null)
+  const [isStick, setStick] = createSignal(false)
+  const [temperature, setTemperature] = createSignal(0.6)
+  const temperatureSetting = (value: number) => { setTemperature(value) }
+  const maxHistoryMessages = parseInt(import.meta.env.PUBLIC_MAX_HISTORY_MESSAGES || '9')
 
+  createEffect(() => (isStick() && smoothToBottom()))
 
   onMount(() => {
+    let lastPostion = window.scrollY
+
+    window.addEventListener('scroll', () => {
+      const nowPostion = window.scrollY
+      nowPostion < lastPostion && setStick(false)
+      lastPostion = nowPostion
+    })
+
     try {
-      if (localStorage.getItem('messageList')) {
-        setMessageList(JSON.parse(localStorage.getItem('messageList')))
-      }
-      if (localStorage.getItem('systemRoleSettings')) {
-        setCurrentSystemRoleSettings(localStorage.getItem('systemRoleSettings'))
-      }
+      if (sessionStorage.getItem('messageList'))
+        setMessageList(JSON.parse(sessionStorage.getItem('messageList')))
+
+      if (sessionStorage.getItem('systemRoleSettings'))
+        setCurrentSystemRoleSettings(sessionStorage.getItem('systemRoleSettings'))
+
+      if (localStorage.getItem('stickToBottom') === 'stick')
+        setStick(true)
     } catch (err) {
       console.error(err)
     }
-    
+
     window.addEventListener('beforeunload', handleBeforeUnload)
     onCleanup(() => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -37,17 +52,16 @@ export default () => {
   })
 
   const handleBeforeUnload = () => {
-    localStorage.setItem('messageList', JSON.stringify(messageList()))
-    localStorage.setItem('systemRoleSettings', currentSystemRoleSettings())
+    sessionStorage.setItem('messageList', JSON.stringify(messageList()))
+    sessionStorage.setItem('systemRoleSettings', currentSystemRoleSettings())
+    isStick() ? localStorage.setItem('stickToBottom', 'stick') : localStorage.removeItem('stickToBottom')
   }
 
-  const handleButtonClick = async () => {
+  const handleButtonClick = async() => {
     const inputValue = inputRef.value
-    if (!inputValue) {
+    if (!inputValue)
       return
-    }
-    // @ts-ignore
-    if (window?.umami) umami.trackEvent('chat_generate')
+
     inputRef.value = ''
     setMessageList([
       ...messageList(),
@@ -57,13 +71,18 @@ export default () => {
       },
     ])
     requestWithLatestMessage()
+    instantToBottom()
   }
 
   const smoothToBottom = useThrottleFn(() => {
     window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
   }, 300, false, true)
 
-  const requestWithLatestMessage = async () => {
+  const instantToBottom = () => {
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })
+  }
+
+  const requestWithLatestMessage = async() => {
     setLoading(true)
     setCurrentAssistantMessage('')
     setCurrentError(null)
@@ -71,7 +90,7 @@ export default () => {
     try {
       const controller = new AbortController()
       setController(controller)
-      const requestMessageList = [...messageList()]
+      const requestMessageList = messageList().slice(-maxHistoryMessages)
       if (currentSystemRoleSettings()) {
         requestMessageList.unshift({
           role: 'system',
@@ -89,6 +108,7 @@ export default () => {
             t: timestamp,
             m: requestMessageList?.[requestMessageList.length - 1]?.content || '',
           }),
+          temperature: temperature(),
         }),
         signal: controller.signal,
       })
@@ -99,9 +119,9 @@ export default () => {
         throw new Error('Request failed')
       }
       const data = response.body
-      if (!data) {
+      if (!data)
         throw new Error('No data')
-      }
+
       const reader = data.getReader()
       const decoder = new TextDecoder('utf-8')
       let done = false
@@ -109,14 +129,14 @@ export default () => {
       while (!done) {
         const { value, done: readerDone } = await reader.read()
         if (value) {
-          let char = decoder.decode(value)
-          if (char === '\n' && currentAssistantMessage().endsWith('\n')) {
+          const char = decoder.decode(value)
+          if (char === '\n' && currentAssistantMessage().endsWith('\n'))
             continue
-          }
-          if (char) {
+
+          if (char)
             setCurrentAssistantMessage(currentAssistantMessage() + char)
-          }
-          smoothToBottom()
+
+          isStick() && instantToBottom()
         }
         done = readerDone
       }
@@ -127,6 +147,7 @@ export default () => {
       return
     }
     archiveCurrentMessage()
+    isStick() && instantToBottom()
   }
 
   const archiveCurrentMessage = () => {
@@ -141,16 +162,18 @@ export default () => {
       setCurrentAssistantMessage('')
       setLoading(false)
       setController(null)
-      inputRef.focus()
+      // Disable auto-focus on touch devices
+      if (!('ontouchstart' in document.documentElement || navigator.maxTouchPoints > 0))
+        inputRef.focus()
     }
   }
 
   const clear = () => {
     inputRef.value = ''
-    inputRef.style.height = 'auto';
+    inputRef.style.height = 'auto'
     setMessageList([])
     setCurrentAssistantMessage('')
-    setCurrentSystemRoleSettings('')
+    setCurrentError(null)
   }
 
   const stopStreamFetch = () => {
@@ -163,19 +186,18 @@ export default () => {
   const retryLastFetch = () => {
     if (messageList().length > 0) {
       const lastMessage = messageList()[messageList().length - 1]
-      console.log(lastMessage)
-      if (lastMessage.role === 'assistant') {
+      if (lastMessage.role === 'assistant')
         setMessageList(messageList().slice(0, -1))
-      }
       requestWithLatestMessage()
     }
   }
 
   const handleKeydown = (e: KeyboardEvent) => {
-    if (e.isComposing || e.shiftKey) {
+    if (e.isComposing || e.shiftKey)
       return
-    }
+
     if (e.key === 'Enter') {
+      e.preventDefault()
       handleButtonClick()
     }
   }
@@ -188,6 +210,7 @@ export default () => {
         setSystemRoleEditing={setSystemRoleEditing}
         currentSystemRoleSettings={currentSystemRoleSettings}
         setCurrentSystemRoleSettings={setCurrentSystemRoleSettings}
+        temperatureSetting={temperatureSetting}
       />
       <Index each={messageList()}>
         {(message, index) => (
@@ -224,11 +247,11 @@ export default () => {
             autocomplete="off"
             autofocus
             onInput={() => {
-              inputRef.style.height = 'auto';
-              inputRef.style.height = inputRef.scrollHeight + 'px';
+              inputRef.style.height = 'auto'
+              inputRef.style.height = `${inputRef.scrollHeight}px`
             }}
             rows="1"
-            class='gen-textarea'
+            class="gen-textarea"
           />
           <button onClick={handleButtonClick} disabled={systemRoleEditing()} gen-slate-btn>
             Send
@@ -238,6 +261,13 @@ export default () => {
           </button>
         </div>
       </Show>
+      <div class="fixed bottom-5 left-5 rounded-md hover:bg-slate/10 w-fit h-fit transition-colors active:scale-90" class:stick-btn-on={isStick()}>
+        <div>
+          <button class="p-2.5 text-base" title="stick to bottom" type="button" onClick={() => setStick(!isStick())}>
+            <div i-ph-arrow-line-down-bold />
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
